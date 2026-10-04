@@ -1,0 +1,55 @@
+# Use this instead of Nginx when your Dockerised Traefik already owns ports 80/443 on the VPS
+# (e.g. because LinkVault runs there). Traefik then routes to DataBridge running natively on the host.
+#
+# 1. In shared/.env set  BIND_HOST=172.17.0.1   (the docker0 bridge IP; `ip addr show docker0` to confirm)
+# 2. Give the Traefik container access to the host:
+#        extra_hosts: ["host.docker.internal:host-gateway"]
+#    and enable the file provider, e.g.  --providers.file.directory=/etc/traefik/dynamic  (mounted volume)
+# 3. Copy this file into that directory. install.sh fills in __DOMAIN__ and __PORT__.
+# 4. If UFW is on:  sudo ufw allow from 172.16.0.0/12 to any port __PORT__ proto tcp
+http:
+  routers:
+    databridge-api:
+      rule: "Host(`__DOMAIN__`) && (PathPrefix(`/api`) || Path(`/health`))"
+      entryPoints: [websecure]
+      service: databridge
+      priority: 100
+      middlewares: [databridge-ratelimit]
+      tls:
+        certResolver: letsencrypt
+        options: databridge-tls
+    databridge-studio:
+      rule: "Host(`__DOMAIN__`)"
+      entryPoints: [websecure]
+      service: databridge
+      priority: 10
+      tls:
+        certResolver: letsencrypt
+        options: databridge-tls
+
+  middlewares:
+    databridge-ratelimit:
+      rateLimit:
+        average: 20
+        burst: 40
+
+  services:
+    databridge:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:__PORT__"
+
+# Secure websockets: Traefik upgrades websockets (studio /ws, streaming API /api/v1/stream) automatically and
+# sends X-Forwarded-Proto: https, so they are wss:// end to end at the edge. TLS 1.2+ only, strong ciphers:
+tls:
+  options:
+    databridge-tls:
+      minVersion: VersionTLS12
+      sniStrict: true
+      cipherSuites:
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+        - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305

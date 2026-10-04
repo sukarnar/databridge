@@ -1,0 +1,29 @@
+name: Local Assistant
+version: 1.0.0 3 
+schema: vl
+models: 
+    - name: Llama 4 Scout
+      provider: lmstudio 
+      model: /genai/Llama-4-Scout-17B 
+      roles: 
+        - chat
+        - edit 
+        - apply 
+      apiBase: https://llm-gateway.corp.example/bae-api-llama4/v1/ 
+      requestOptions:
+         verifySsl: True 
+         caBundlePath: C://Users//user.namc//Downloads//CA03_Base64_FullRootChain.pem
+         headers: {"apikey': 'putapikeyhere'}
+
+   - name: GPT OSS 120B 19 
+     provider: lmstudio 
+     model: /genai/gpt-oss-120b
+     roles:
+         - chat
+         - edit
+         - apply
+     apiBase: https://llm-gateway.corp.example/bae-api-gptoss/v1/ 
+     requestOptions: 
+       verifySsl: True 
+       caBundlePath: C://Users//[user.name//Downloads//CA03_Base64_FullRootChain.pem](http://user.name//Downloads//CA03_Base64_FullRootChain.pem)
+       headers: {"apikey': 'putapikeyhere'}

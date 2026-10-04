@@ -1,0 +1,94 @@
+# Native (no Docker) deploy to the Hostinger VPS: test -> package -> copy over SSH -> deploy.sh.
+# Active only when the repository variable DEPLOY_MODE is "native"
+# (Settings -> Secrets and variables -> Actions -> Variables). Otherwise the Docker workflow deploys.
+#
+# Secrets: VPS_HOST, VPS_USER, VPS_SSH_KEY, optional VPS_PORT  (same as the Docker workflow)
+name: deploy-native
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Roll back to an installed release id (e.g. 1a2b3c4). Leave blank to deploy the current commit."
+        required: false
+        default: ""
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  BASE: /opt/databridge
+
+jobs:
+  test:
+    if: ${{ vars.DEPLOY_MODE == 'native' && !github.event.inputs.release }}
+    runs-on: ubuntu-latest
+    # The Docker deployment stores metadata in PostgreSQL, which enforces column lengths and types that SQLite
+    # ignores: run the tests on both.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: databridge_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest httpx "psycopg[binary]"
+      - name: Tests (SQLite)
+        run: pytest -q
+      - name: Tests (PostgreSQL)
+        run: pytest -q
+        env:
+          DATABRIDGE_DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/databridge_test
+
+  deploy:
+    needs: test
+    if: ${{ always() && vars.DEPLOY_MODE == 'native' && (needs.test.result == 'success' || (needs.test.result == 'skipped' && github.event.inputs.release)) }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - id: rel
+        run: |
+          if [ -n "${{ github.event.inputs.release }}" ]; then
+            echo "id=${{ github.event.inputs.release }}" >> "$GITHUB_OUTPUT"; echo "tarball=" >> "$GITHUB_OUTPUT"
+          else
+            ID="${GITHUB_SHA::7}"
+            mkdir -p out && git archive --format=tar.gz -o "out/databridge-$ID.tar.gz" HEAD
+            cp deploy/native/deploy.sh out/deploy.sh
+            echo "id=$ID" >> "$GITHUB_OUTPUT"; echo "tarball=$BASE/incoming/databridge-$ID.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Copy release to the VPS
+        if: ${{ steps.rel.outputs.tarball != '' }}
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          source: "out/*"
+          target: ${{ env.BASE }}/incoming
+          strip_components: 1
+      - name: Install, switch, health check (auto-rollback on failure)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          command_timeout: 20m
+          script: |
+            set -e
+            SCRIPT=${{ env.BASE }}/bin/deploy.sh
+            [ -f ${{ env.BASE }}/incoming/deploy.sh ] && install -m 755 ${{ env.BASE }}/incoming/deploy.sh "$SCRIPT" && rm ${{ env.BASE }}/incoming/deploy.sh
+            bash "$SCRIPT" "${{ steps.rel.outputs.id }}" "${{ steps.rel.outputs.tarball }}"

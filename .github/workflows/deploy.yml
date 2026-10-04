@@ -1,0 +1,120 @@
+# Test -> build image -> push to GHCR -> deploy to the Hostinger VPS over SSH.
+# Docker mode (default). Set repository variable DEPLOY_MODE=native to use deploy-native.yml instead.
+#
+# Repository secrets needed:
+#   VPS_HOST       VPS IP or host name
+#   VPS_USER       SSH user on the VPS (member of the docker group)
+#   VPS_SSH_KEY    private key for that user (the public key goes in ~/.ssh/authorized_keys)
+#   VPS_PORT       optional, defaults to 22
+name: build-and-deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Deploy an existing image tag (e.g. sha-1a2b3c4) to roll back. Leave blank to test, build and deploy the current commit."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/databridge
+  DEPLOY_DIR: /opt/databridge
+
+jobs:
+  test:
+    if: ${{ vars.DEPLOY_MODE != 'native' && (github.event.inputs.tag == '' || github.event.inputs.tag == null) }}
+    runs-on: ubuntu-latest
+    # The Docker deployment stores metadata in PostgreSQL, which enforces column lengths and types that SQLite
+    # ignores: run the tests on both.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: databridge_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest httpx "psycopg[binary]"
+      - name: Tests (SQLite)
+        run: pytest -q
+      - name: Tests (PostgreSQL)
+        run: pytest -q
+        env:
+          DATABRIDGE_DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/databridge_test
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    if: ${{ always() && vars.DEPLOY_MODE != 'native' && (needs.build.result == 'success' || needs.build.result == 'skipped') && !contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy compose file and scripts to the VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          source: "docker-compose.yml,deploy/*"
+          target: ${{ env.DEPLOY_DIR }}
+      - name: Pull and restart
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            set -e
+            cd ${{ env.DEPLOY_DIR }}
+            test -f .env || { echo "Missing ${{ env.DEPLOY_DIR }}/.env - create it from .env.example"; exit 1; }
+            mkdir -p inbox backups
+            export IMAGE_TAG=${{ github.event.inputs.tag || needs.build.outputs.tag }}
+            docker compose pull app
+            docker compose up -d --no-build --remove-orphans
+            for i in $(seq 1 30); do
+              if docker compose exec -T app python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
+                echo "Healthy: $IMAGE_TAG"; docker image prune -f; exit 0
+              fi
+              sleep 2
+            done
+            echo "App did not become healthy"; docker compose logs --tail 80 app; exit 1

@@ -1,0 +1,53 @@
+# DataBridge company LLM configuration (example).
+#
+# Apply at every start:   DATABRIDGE_AI_CONFIG_FILE=/etc/databridge/llm.yaml
+# Or import it once:      AI > Models > Company models > Import config
+#
+# Keys never go in this file. Name an environment variable instead (api_key_env), and point TLS entries at
+# certificate files on the server. Endpoints are matched by name: re-applying updates them in place.
+version: 1
+
+endpoints:
+  # The company AI gateway: every employee has an individually issued key, which they add in DataBridge
+  # (AI > Models > Company models > Add my key). The discovery key is only used to list models and for health checks.
+  - name: Company AI gateway
+    base_url: https://llm-gateway.corp.example/v1
+    api_style: openai                 # openai | anthropic
+    network: internal                 # internal = data stays in the company network
+    key_mode: per_user                # shared | per_user | none
+    api_key_env: LLM_GATEWAY_DISCOVERY_KEY
+    allowed_roles: [admin, designer]
+    tls:
+      verify: custom                  # system | custom | off
+      ca_file: /etc/databridge/certs/corp-root-ca.pem
+      # For mutual TLS, add the certificate the provider issued to DataBridge:
+      # client_cert_file: /etc/databridge/certs/databridge.crt
+      # client_key_file: /etc/databridge/certs/databridge.key
+      # client_key_password_env: DATABRIDGE_CLIENT_KEY_PASSWORD
+    approval: approved                # only the models listed below (enabled) can be used
+    models:
+      - id: llama3.1:70b
+        label: Llama 3.1 70B (general)
+        description: Default for classification, extraction and summaries
+      - id: qwen2.5-coder:32b
+        label: Qwen 2.5 Coder 32B
+        description: SQL and code
+        roles: [admin, designer]
+      - id: mistral:7b
+        label: Mistral 7B (fast)
+        enabled: false                # discovered but not approved yet
+
+  # A GPU server run by the data team, one shared key for DataBridge.
+  - name: Data team vLLM
+    base_url: http://10.20.30.40:8000/v1
+    key_mode: shared
+    api_key_env: VLLM_API_KEY
+    network: internal
+    approval: open                    # every model the server lists is usable
+
+defaults:
+  playground: Company AI gateway / llama3.1:70b
+  automap: Company AI gateway / llama3.1:70b
+  workflow: Company AI gateway / llama3.1:70b
+
+# prune: true   # disable file-managed endpoints that are no longer listed here

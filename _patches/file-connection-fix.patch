@@ -1,0 +1,176 @@
+diff --git a/databridge/connectors/filesystem.py b/databridge/connectors/filesystem.py
+index 2612d5d..2909d8b 100644
+--- a/databridge/connectors/filesystem.py
++++ b/databridge/connectors/filesystem.py
+@@ -7,7 +7,7 @@ from typing import Any, Literal, Optional
+ 
+ import fsspec
+ import polars as pl
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, Field, field_validator, model_validator
+ 
+ from databridge.connectors.base import Connector, Node, TestResult
+ from databridge.ingest.sheet_profile import (
+@@ -34,7 +34,7 @@ PROTOCOL_PACKAGES = {
+ class FileSystemConfig(BaseModel):
+     protocol: Literal["file", "smb", "sftp", "ftp", "s3", "abfs", "gcs"] = Field(
+         "file", description="Storage type")
+-    root: str = Field(..., description="Base folder, e.g. /data/exports or share/folder or bucket/prefix")
++    root: str = Field(..., description="Folder (or one file) on the DataBridge server, e.g. C:\\Data\\HR or /data/exports; share/folder or bucket/prefix")
+     host: Optional[str] = Field(None, description="Server host (SMB, SFTP, FTP)")
+     port: Optional[int] = Field(None, description="Port (optional)")
+     username: Optional[str] = Field(None, description="User name or access key")
+@@ -42,6 +42,28 @@ class FileSystemConfig(BaseModel):
+     file_pattern: str = Field("*", description="Files to show and watch, e.g. sales_*.xlsx")
+     options_json: str = Field("{}", description="Extra fsspec options as JSON")
+ 
++    @field_validator("root")
++    @classmethod
++    def _clean_root(cls, v: str) -> str:
++        # Pasted paths: Windows "Copy as path" adds quotes; backslashes become / (fsspec's form on every OS)
++        v = (v or "").strip().strip('"').strip("'").strip()
++        if not v:
++            raise ValueError("Enter the folder, e.g. C:\\Data\\Exports or /data/exports")
++        return v.replace("\\", "/")
++
++    @model_validator(mode="after")
++    def _file_as_root(self):
++        """Root pointing at one file (a common first try): watch that file in its folder."""
++        if self.protocol == "file":
++            from pathlib import Path
++
++            p = Path(self.root)
++            if p.is_file():
++                if self.file_pattern in ("", "*"):
++                    self.file_pattern = p.name
++                self.root = p.parent.as_posix()
++        return self
++
+ 
+ class FileSystemConnector(Connector):
+     type_name = "filesystem"
+@@ -84,10 +106,14 @@ class FileSystemConnector(Connector):
+         return self._fs
+ 
+     def _full(self, path: str | None) -> str:
+-        root = self.cfg.root.rstrip("/")
++        root = self.cfg.root.replace("\\", "/").rstrip("/") or "/"
+         if not path:
+             return root
+-        return path if path.startswith(root) else f"{root}/{path.lstrip('/')}"
++        path = path.replace("\\", "/")
++        # fsspec returns full paths (on Windows "C:/Users/..."); compare without case on Windows drives
++        if path.lower().startswith(root.lower()):
++            return path
++        return f"{root.rstrip('/')}/{path.lstrip('/')}"
+ 
+     def _matches(self, name: str) -> bool:
+         return fnmatch.fnmatch(name.lower(), (self.cfg.file_pattern or "*").lower())
+diff --git a/databridge/services/connections.py b/databridge/services/connections.py
+index 0c3e9d8..badf27f 100644
+--- a/databridge/services/connections.py
++++ b/databridge/services/connections.py
+@@ -24,10 +24,37 @@ def get_connection(conn_id: int) -> Connection:
+         return conn
+ 
+ 
++def readable_validation(e, model) -> str:
++    """'Root: field required' instead of pydantic's dump."""
++    parts = []
++    for err in e.errors():
++        field = str(err["loc"][0]) if err.get("loc") else ""
++        label = field.replace("_", " ").capitalize() if field else "Settings"
++        msg = err.get("msg", "invalid").removeprefix("Value error, ")
++        msg = {"Field required": "this field is required"}.get(msg, msg)
++        parts.append(f"{label}: {msg}")
++    return "; ".join(parts) or "Check the settings"
++
++
+ def save_connection(name: str, type_name: str, values: dict[str, Any], conn_id: int | None = None) -> Connection:
+     """Creates or updates a connection. Blank secret fields keep the stored secret."""
++    from pydantic import ValidationError
++
+     cls = connector_class(type_name)
+-    cls.config_model(**values)  # validate before saving
++    try:
++        model = cls.config_model(**values)  # validate before saving
++    except ValidationError as e:
++        raise ValueError(readable_validation(e, cls.config_model)) from None
++    cleaned = model.model_dump()
++    values = {k: cleaned.get(k, v) for k, v in values.items()}  # e.g. a quoted Windows path, cleaned
++    if type_name == "filesystem" and cleaned.get("file_pattern") not in (None, "*", values.get("file_pattern")):
++        values["file_pattern"] = cleaned["file_pattern"]  # Root was a file: its folder + that file name
++    if type_name == "filesystem" and cleaned.get("protocol") == "file":
++        from pathlib import Path
++
++        if not Path(cleaned["root"]).is_dir():
++            raise ValueError(f"Root: \u201c{cleaned['root']}\u201d was not found on the DataBridge "
++                             "server (the path is read on the machine running DataBridge, not in your browser).")
+     plain, secret = split_config(cls, values)
+     with session_scope() as s:
+         conn = s.get(Connection, conn_id) if conn_id else Connection(name=name, type=type_name)
+diff --git a/databridge/ui/common.py b/databridge/ui/common.py
+index 722f02b..f97631f 100644
+--- a/databridge/ui/common.py
++++ b/databridge/ui/common.py
+@@ -83,6 +83,11 @@ def is_user_error(e: BaseException) -> bool:
+ 
+ 
+ def friendly_error(e: BaseException) -> str:
++    from pydantic import ValidationError
++
++    if isinstance(e, ValidationError):
++        return "; ".join(f"{'.'.join(map(str, x.get('loc') or ())) or 'Value'}: "
++                         f"{x.get('msg', 'invalid').removeprefix('Value error, ')}" for x in e.errors())
+     if is_user_error(e):
+         return str(e)
+     return f"Something went wrong ({type(e).__name__}: {e}). Details are in the server log."
+@@ -178,13 +183,16 @@ def close_dialog(page: ft.Page) -> None:
+ 
+ def dialog(page: ft.Page, title: str, content: ft.Control, actions: list[ft.Control],
+            width: int = 560, height: int | None = None) -> ft.AlertDialog:
+-    status = DialogStatus(max(200, width - 320))
++    # Errors and progress from the buttons: a full-width line just above them, where people look after a click
++    status = DialogStatus(width)
+     status.view.padding = ft.Padding.symmetric(horizontal=10, vertical=6)
+     dlg = ft.AlertDialog(
+         modal=True,
+         title=ft.Text(title, weight=ft.FontWeight.W_600),
+         content=ft.Container(content, width=width, height=height, padding=ft.Padding.only(top=8)),
+-        actions=[status.view, *actions],
++        actions=[ft.Column([status.view, ft.Row(actions, alignment=ft.MainAxisAlignment.END, spacing=8,
++                                                 wrap=True)], spacing=10, width=width, tight=True,
++                           horizontal_alignment=ft.CrossAxisAlignment.STRETCH)],
+         actions_alignment=ft.MainAxisAlignment.END,
+     )
+     dlg._db_status = status  # errors from this dialog's buttons are shown here (see guarded)
+diff --git a/tests/test_rest.py b/tests/test_rest.py
+index 90faed7..a16993f 100644
+--- a/tests/test_rest.py
++++ b/tests/test_rest.py
+@@ -861,3 +861,25 @@ def test_upload_with_a_taken_name_is_a_clear_error_and_leaves_nothing_behind():
+     with pytest.raises(Exception):
+         sources.create_upload_source("Broken upload", "broken.xlsx", b"not a workbook", SheetProfile())
+     assert len(sources.list_sources()) == before
++
++
++def test_file_connection_paths_are_forgiving_and_errors_readable(tmp_path):
++    folder = tmp_path / "HR files"
++    folder.mkdir()
++    (folder / "employees.csv").write_text("id,name\n1,Ann\n")
++    # quoted Windows-style "Copy as path" of the file itself: folder + that file
++    quoted = '"' + str(folder / "employees.csv") + '"'
++    c = connections.save_connection("Local HR", "filesystem", {"protocol": "file", "root": quoted})
++    assert c.config["root"] == folder.as_posix() and c.config["file_pattern"] == "employees.csv"
++    nodes = connections.browse(c.id)
++    assert [n.name for n in nodes] == ["employees.csv"]
++    with pytest.raises(ValueError, match="was not found on the DataBridge server"):
++        connections.save_connection("Typo", "filesystem", {"protocol": "file", "root": str(tmp_path / "nope")})
++    with pytest.raises(ValueError, match=r"^Root: "):
++        connections.save_connection("Blank", "filesystem", {"protocol": "file", "root": "  "})
++    from databridge.connectors.filesystem import FileSystemConfig, FileSystemConnector
++    assert FileSystemConfig(protocol="smb", root=r"share\HR\exports").root == "share/HR/exports"
++    conn_ = FileSystemConnector({"protocol": "file", "root": "C:/Users/S/HR"})
++    assert conn_._full("C:/Users/S/HR/a.xlsx") == "C:/Users/S/HR/a.xlsx"
++    assert conn_._full("c:/users/s/hr/a.xlsx") == "c:/users/s/hr/a.xlsx"
++    assert conn_._full("a.xlsx") == "C:/Users/S/HR/a.xlsx"

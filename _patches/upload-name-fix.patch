@@ -1,0 +1,100 @@
+diff --git a/databridge/services/sources.py b/databridge/services/sources.py
+index 89c83fc..f796ff8 100644
+--- a/databridge/services/sources.py
++++ b/databridge/services/sources.py
+@@ -101,12 +101,22 @@ def _find_by_hash(source_id: int, file_hash: str) -> Snapshot | None:
+ 
+ def create_upload_source(name: str, filename: str, content: bytes, profile: SheetProfile) -> SourceObject:
+     """First upload: saves the Sheet Profile with the source and ingests the file."""
+-    with session_scope() as s:
+-        src = SourceObject(name=name, kind="upload", object_ref={"file_name": filename},
+-                           sheet_profile=profile.to_dict(), fields=[])
+-        s.add(src)
+-        s.flush()
+-    ingest_file(src.id, filename, content, auto_publish=False)
++    from sqlalchemy.exc import IntegrityError
++
++    name = check_new_name(name)
++    try:
++        with session_scope() as s:
++            src = SourceObject(name=name, kind="upload", object_ref={"file_name": filename},
++                               sheet_profile=profile.to_dict(), fields=[])
++            s.add(src)
++            s.flush()
++    except IntegrityError:  # created by someone else a moment ago
++        raise ValueError(f"A source named \u201c{name}\u201d already exists. Choose another name.") from None
++    try:
++        ingest_file(src.id, filename, content, auto_publish=False)
++    except BaseException:  # nothing half-created: fix the file or profile and try again
++        delete_source(src.id)
++        raise
+     return get_source(src.id)
+ 
+ 
+diff --git a/databridge/ui/components/profile_wizard.py b/databridge/ui/components/profile_wizard.py
+index 5af1bc6..8077e4f 100644
+--- a/databridge/ui/components/profile_wizard.py
++++ b/databridge/ui/components/profile_wizard.py
+@@ -29,8 +29,10 @@ class ProfileWizard:
+ 
+     def __init__(self, page: ft.Page, filename: str, content: bytes,
+                  on_save: Callable[[str, SheetProfile], None], title: str = "Import spreadsheet",
+-                 name: str | None = None, profile: SheetProfile | None = None):
++                 name: str | None = None, profile: SheetProfile | None = None,
++                 check_name: Callable[[str], str] | None = None):
+         self.page, self.filename, self.content, self.on_save = page, filename, content, on_save
++        self.check_name = check_name  # raises (shown in the wizard, which stays open) when the name can't be used
+         self.is_sheet = ext_of(filename) in SPREADSHEET_EXT
+         self.sheets = list_sheets(content, filename) if self.is_sheet else []
+         self.profile = profile or suggest_profile(content, filename, None)
+@@ -69,10 +71,13 @@ class ProfileWizard:
+         skip.on_submit = guarded(self.page, changed)
+ 
+         def save(_):
+-            if not self.name.value.strip():
++            name = self.name.value.strip()
++            if not name:
+                 raise ValueError("Give the source a name")
++            if self.check_name is not None:
++                name = self.check_name(name)
+             close_dialog(self.page)
+-            self.on_save(self.name.value.strip(), self.profile)
++            self.on_save(name, self.profile)
+ 
+         self.refresh(initial=True)
+         content = ft.Column([
+diff --git a/databridge/ui/views/sources.py b/databridge/ui/views/sources.py
+index 537dbe7..fa86cd8 100644
+--- a/databridge/ui/views/sources.py
++++ b/databridge/ui/views/sources.py
+@@ -158,7 +158,8 @@ class SourcesView:
+                 self.app.navigate("sources")
+             guarded(self.page, work)()
+ 
+-        await asyncio.to_thread(guarded(self.page, lambda: ProfileWizard(self.page, name, content, save).open()))
++        await asyncio.to_thread(guarded(self.page, lambda: ProfileWizard(self.page, name, content, save,
++                                                                       check_name=svc.check_new_name).open()))
+ 
+     async def upload_version(self, src):
+         self.app.require("design")
+diff --git a/tests/test_rest.py b/tests/test_rest.py
+index 815f185..90faed7 100644
+--- a/tests/test_rest.py
++++ b/tests/test_rest.py
+@@ -848,3 +848,16 @@ def test_fingerprint_needs_no_numpy_and_a_native_panic_never_hangs_the_dialog(ba
+                                                                              {"path": "/test"}),
+                                      lambda result: shown.setdefault("success", result)))
+     assert "FakePanic" in shown["error"] and "success" not in shown
++
++
++def test_upload_with_a_taken_name_is_a_clear_error_and_leaves_nothing_behind():
++    from databridge.ingest.sheet_profile import SheetProfile
++
++    csv = b"id,name\n1,Ann\n"
++    sources.create_upload_source("Employees dup", "employees.csv", csv, SheetProfile())
++    before = len(sources.list_sources())
++    with pytest.raises(ValueError, match="already exists"):
++        sources.create_upload_source("Employees dup", "employees.csv", csv, SheetProfile())
++    with pytest.raises(Exception):
++        sources.create_upload_source("Broken upload", "broken.xlsx", b"not a workbook", SheetProfile())
++    assert len(sources.list_sources()) == before

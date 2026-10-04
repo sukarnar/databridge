@@ -1,0 +1,352 @@
+diff --git a/databridge/ui/common.py b/databridge/ui/common.py
+index f97631f..bf58bc0 100644
+--- a/databridge/ui/common.py
++++ b/databridge/ui/common.py
+@@ -66,6 +66,36 @@ def guarded(page: ft.Page, fn: Callable[..., Any]) -> Callable[..., Any]:
+     return handler
+ 
+ 
++def background(page: ft.Page, fn: Callable[..., Any]) -> Callable[..., Any]:
++    """Like guarded, for handlers that call out (APIs, databases, file shares, AI models): the work runs in a
++    worker thread, never on the server's event loop.
++
++    Flet runs plain (sync) handlers on the event loop, so a slow call there froze the server for every user
++    and the API, and a call to DataBridge's own API from the studio could never be answered (deadlock).
++    Repeat clicks while the work runs are ignored. The page is updated afterwards, so controls changed without
++    an explicit update() still show.
++    """
++    import asyncio
++
++    work = guarded(page, fn)
++    busy = {"on": False}
++
++    async def handler(*args, **kwargs):
++        if busy["on"]:
++            return
++        busy["on"] = True
++        try:
++            await asyncio.to_thread(work, *args, **kwargs)
++        finally:
++            busy["on"] = False
++        try:
++            page.update()
++        except Exception:  # noqa: BLE001 - the page may have gone (user left); nothing to show then
++            pass
++
++    return handler
++
++
+ def show_error(page: ft.Page, message: str) -> None:
+     top = _top_dialog(page)
+     if top is not None and getattr(top, "_db_status", None) is not None:
+diff --git a/databridge/ui/views/ai.py b/databridge/ui/views/ai.py
+index fbed774..53b2f7a 100644
+--- a/databridge/ui/views/ai.py
++++ b/databridge/ui/views/ai.py
+@@ -11,7 +11,7 @@ from databridge.ai.templating import PromptTemplateError, variables_in
+ from databridge.core.auth import ROLES
+ from databridge.services import llm, prompts
+ from databridge.ui.views.company_models import CompanyModels
+-from databridge.ui.common import (card, chip, close_dialog, confirm, dialog, empty_state, guarded, mounted,
++from databridge.ui.common import (background, card, chip, close_dialog, confirm, dialog, empty_state, guarded, mounted,
+                                   page_header, toast)
+ 
+ TABS = [("playground", "Playground", ft.Icons.SCIENCE), ("prompts", "Prompts", ft.Icons.TEXT_SNIPPET),
+@@ -101,7 +101,7 @@ class Playground:
+                                          color=ft.Colors.ON_SURFACE_VARIANT)], spacing=8, scroll=ft.ScrollMode.AUTO,
+                                 expand=True)
+         self.spinner = ft.ProgressRing(visible=False, width=22, height=22)
+-        run = ft.FilledButton("Run", icon=ft.Icons.PLAY_ARROW, on_click=guarded(self.page, self.run))
++        run = ft.FilledButton("Run", icon=ft.Icons.PLAY_ARROW, on_click=background(self.page, self.run))
+         actions = [run, self.spinner]
+         if self.app.can("design"):
+             actions.append(ft.OutlinedButton("Save as prompt" if not p else "Update prompt draft",
+@@ -387,7 +387,7 @@ class ModelsTab:
+                     ft.Text(c.last_test_message or "", size=11.5, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1,
+                             overflow=ft.TextOverflow.ELLIPSIS),
+                 ], spacing=2, expand=True),
+-                ft.OutlinedButton("Test", icon=ft.Icons.BOLT, on_click=guarded(self.page, lambda _, cc=c: self.test_key(cc))),
++                ft.OutlinedButton("Test", icon=ft.Icons.BOLT, on_click=background(self.page, lambda _, cc=c: self.test_key(cc))),
+                 ft.IconButton(ft.Icons.EDIT_OUTLINED, tooltip="Edit", on_click=lambda _, cc=c: self.edit_key(cc)),
+                 ft.IconButton(ft.Icons.DELETE_OUTLINE, tooltip="Delete", on_click=lambda _, cc=c: confirm(
+                     self.page, "Delete API key", f"Delete {cc.name}? Prompts and workflows using it will stop working.",
+@@ -441,7 +441,7 @@ class ModelsTab:
+             ft.Text("The key is tested and the provider's model list is loaded when you save.", size=12,
+                     color=ft.Colors.ON_SURFACE_VARIANT)], spacing=12, tight=True), [
+             ft.TextButton("Cancel", on_click=lambda _: close_dialog(self.page)),
+-            ft.FilledButton("Save and test", on_click=guarded(self.page, save))], width=480)
++            ft.FilledButton("Save and test", on_click=background(self.page, save))], width=480)
+ 
+     def test_key(self, c) -> None:
+         ok, msg = llm.test_credential(self.app.user.id, c.id, self.app.user.username)
+@@ -537,7 +537,7 @@ class ModelsTab:
+                     "http://host.docker.internal:11434/v1 (Docker).", size=11.5, color=ft.Colors.ON_SURFACE_VARIANT),
+         ], spacing=12, tight=True, scroll=ft.ScrollMode.AUTO), [
+             ft.TextButton("Cancel", on_click=lambda _: close_dialog(self.page)),
+-            ft.FilledButton("Save and test", on_click=guarded(self.page, save))], width=620)
++            ft.FilledButton("Save and test", on_click=background(self.page, save))], width=620)
+ 
+     def _tls_section(self, e):
+         """Certificate settings for HTTPS endpoints: provider CA, client certificate (mutual TLS)."""
+diff --git a/databridge/ui/views/company_models.py b/databridge/ui/views/company_models.py
+index 40a28b9..94c3f30 100644
+--- a/databridge/ui/views/company_models.py
++++ b/databridge/ui/views/company_models.py
+@@ -8,7 +8,7 @@ import flet as ft
+ from databridge.core.auth import ROLES
+ from databridge.services import ai_config, ai_health, config_sources, llm
+ from databridge.ui.views.config_sources_ui import UploadDialog, sources_section
+-from databridge.ui.common import card, chip, close_dialog, confirm, dialog, guarded, toast
++from databridge.ui.common import background, card, chip, close_dialog, confirm, dialog, guarded, toast
+ 
+ HEALTH_COLOR = {"ok": ft.Colors.GREEN_600, "warning": ft.Colors.AMBER_700, "failed": ft.Colors.RED_500}
+ KEY_MODE_CHIP = {"shared": "company key", "per_user": "your own key", "none": "no key"}
+@@ -101,7 +101,7 @@ class CompanyModels:
+                             size=12.5, weight=ft.FontWeight.W_500),
+                     ft.TextButton("Replace key" if k else "Add my key", icon=ft.Icons.ADD_MODERATOR,
+                                   on_click=lambda _, ee=e: self.my_key(ee)),
+-                    *([ft.TextButton("Test", on_click=guarded(self.page, lambda _, ee=e: self.test_my_key(ee))),
++                    *([ft.TextButton("Test", on_click=background(self.page, lambda _, ee=e: self.test_my_key(ee))),
+                        ft.TextButton("Remove", on_click=lambda _, ee=e: confirm(
+                            self.page, "Remove your key", f"Remove your key for {ee.name}?",
+                            lambda: self.remove_my_key(ee)))] if k else []),
+@@ -112,7 +112,7 @@ class CompanyModels:
+             if self.admin:
+                 actions = [
+                     ft.OutlinedButton("Test", icon=ft.Icons.BOLT,
+-                                      on_click=guarded(self.page, lambda _, ee=e: self.check(ee))),
++                                      on_click=background(self.page, lambda _, ee=e: self.check(ee))),
+                     ft.IconButton(ft.Icons.CHECKLIST, tooltip="Model catalog: approve, rename, restrict",
+                                   on_click=lambda _, ee=e: self.catalog(ee)),
+                     ft.IconButton(ft.Icons.EDIT_OUTLINED, tooltip="Edit", on_click=lambda _, ee=e: self.tab.edit_ep(ee)),
+@@ -135,7 +135,7 @@ class CompanyModels:
+                 ft.OutlinedButton("Export config", icon=ft.Icons.DOWNLOAD, on_click=guarded(
+                     self.page, lambda _: self.export_config())),
+                 ft.OutlinedButton("Check health now", icon=ft.Icons.MONITOR_HEART_OUTLINED,
+-                                  on_click=guarded(self.page, lambda _: self.check_all())),
++                                  on_click=background(self.page, lambda _: self.check_all())),
+                 ft.FilledButton("Add endpoint", icon=ft.Icons.ADD, on_click=lambda _: self.tab.edit_ep(None)),
+             ]
+         banner = []
+@@ -175,7 +175,7 @@ class CompanyModels:
+                   "for your calls and your workflows, and never shown again (admins can't read it either)."),
+             key], spacing=12, tight=True),
+             [ft.TextButton("Cancel", on_click=lambda _: close_dialog(self.page)),
+-             ft.FilledButton("Save and test", on_click=guarded(self.page, save))], width=520)
++             ft.FilledButton("Save and test", on_click=background(self.page, save))], width=520)
+ 
+     def test_my_key(self, ep) -> None:
+         ok, msg = llm.test_my_endpoint_key(self.app.user, ep.id)
+diff --git a/databridge/ui/views/connections.py b/databridge/ui/views/connections.py
+index 2c40fef..7fb09f4 100644
+--- a/databridge/ui/views/connections.py
++++ b/databridge/ui/views/connections.py
+@@ -6,7 +6,7 @@ from databridge.connectors.database import DIALECTS, installed_dialects
+ from databridge.connectors.registry import CONNECTORS
+ from databridge.core.security import decrypt_json
+ from databridge.services import connections as svc
+-from databridge.ui.common import mounted, ModelForm, card, chip, close_dialog, confirm, dialog, empty_state, guarded, page_header, toast
++from databridge.ui.common import background, mounted, ModelForm, card, chip, close_dialog, confirm, dialog, empty_state, guarded, page_header, toast
+ 
+ 
+ REST_AUTH_FIELDS = {
+@@ -51,7 +51,7 @@ class ConnectionsView:
+                     ft.Text(c.last_test_message or "", size=11, color=ft.Colors.ON_SURFACE_VARIANT,
+                             max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                 ], spacing=2, expand=True),
+-                ft.OutlinedButton("Test", icon=ft.Icons.BOLT, on_click=guarded(self.page, lambda _, i=c.id: self.test(i))),
++                ft.OutlinedButton("Test", icon=ft.Icons.BOLT, on_click=background(self.page, lambda _, i=c.id: self.test(i))),
+                 ft.OutlinedButton("Explore", icon=ft.Icons.ACCOUNT_TREE,
+                                   on_click=lambda _, i=c.id: self.app.navigate("explorer", connection_id=i)),
+                 *([ft.IconButton(ft.Icons.EDIT_OUTLINED, tooltip="Edit", on_click=lambda _, cc=c: self.edit(cc)),
+@@ -221,6 +221,6 @@ class ConnectionsView:
+         dialog(self.page, "Edit connection" if conn else "New connection",
+                ft.Column([name, type_dd, form_holder, hint, certs], spacing=12, scroll=ft.ScrollMode.AUTO),
+                [ft.TextButton("Cancel", on_click=lambda _: close_dialog(self.page)),
+-                ft.OutlinedButton("Save", on_click=guarded(self.page, lambda _: save(False))),
+-                ft.FilledButton("Save and test", on_click=guarded(self.page, lambda _: save(True)))],
++                ft.OutlinedButton("Save", on_click=background(self.page, lambda _: save(False))),
++                ft.FilledButton("Save and test", on_click=background(self.page, lambda _: save(True)))],
+                width=520, height=520)
+diff --git a/databridge/ui/views/explorer.py b/databridge/ui/views/explorer.py
+index 2ca5bf6..b9a7cec 100644
+--- a/databridge/ui/views/explorer.py
++++ b/databridge/ui/views/explorer.py
+@@ -9,7 +9,7 @@ from databridge.connectors.base import Node
+ from databridge.ingest.sheet_profile import SPREADSHEET_EXT, ext_of
+ from databridge.services import connections as conn_svc
+ from databridge.services import sources as src_svc
+-from databridge.ui.common import (DialogStatus, card, chip, close_dialog, df_table, dialog, empty_state,
++from databridge.ui.common import (background, DialogStatus, card, chip, close_dialog, df_table, dialog, empty_state,
+                                   friendly_error, guarded, mounted, page_header, run_in_dialog, toast, type_badge)
+ 
+ ICONS = {"folder": ft.Icons.FOLDER, "file": ft.Icons.INSERT_DRIVE_FILE, "sheet": ft.Icons.GRID_ON,
+@@ -109,7 +109,7 @@ class ExplorerView:
+                     ], spacing=4),
+                     height=32, padding=ft.Padding.symmetric(horizontal=6), border_radius=ft.BorderRadius.all(6),
+                     bgcolor=ft.Colors.SECONDARY_CONTAINER if selected else None,
+-                    on_click=guarded(self.page, lambda _, node=n: self.click(node)), ink=True,
++                    on_click=background(self.page, lambda _, node=n: self.click(node)), ink=True,
+                 ))
+                 if is_open:
+                     add(self.children.get(k, []), depth + 1)
+@@ -161,7 +161,7 @@ class ExplorerView:
+ 
+         def preview(ref: dict) -> None:
+             node = Node(f"{ref.get('method', 'GET')} {ref.get('path', '')}", "request", ref)
+-            guarded(self.page, lambda: self.show_detail(node, ref))()
++            self.page.run_thread(guarded(self.page, lambda: self.show_detail(node, ref)))  # off the event loop
+ 
+         request_dialog(self.page, "REST request", initial, preview)
+ 
+@@ -333,5 +333,5 @@ class ExplorerView:
+ 
+         dialog(self.page, "Custom SQL", ft.Column([sql, msg], tight=True, spacing=8), [
+             ft.TextButton("Cancel", on_click=lambda _: close_dialog(self.page)),
+-            ft.FilledButton("Validate and preview", on_click=guarded(self.page, run)),
++            ft.FilledButton("Validate and preview", on_click=background(self.page, run)),
+         ], width=640)
+diff --git a/databridge/ui/views/sources.py b/databridge/ui/views/sources.py
+index fa86cd8..a3a8a46 100644
+--- a/databridge/ui/views/sources.py
++++ b/databridge/ui/views/sources.py
+@@ -7,7 +7,7 @@ import flet as ft
+ from databridge.config import settings
+ from databridge.ingest.sheet_profile import SUPPORTED_EXT, SheetProfile
+ from databridge.services import sources as svc
+-from databridge.ui.common import (card, chip, close_dialog, confirm, df_table, dialog, empty_state, guarded,
++from databridge.ui.common import (background, card, chip, close_dialog, confirm, df_table, dialog, empty_state, guarded,
+                                   page_header, toast, type_badge)
+ from databridge.ui.components.profile_wizard import ProfileWizard
+ 
+@@ -75,7 +75,7 @@ class SourcesView:
+                                          on_click=lambda _, src=s: self.page.run_task(self.upload_version, src))
+                        if s.kind == "upload" else
+                        ft.OutlinedButton("Refresh", icon=ft.Icons.REFRESH,
+-                                         on_click=guarded(self.page, lambda _, src=s: self.refresh(src))))
++                                         on_click=background(self.page, lambda _, src=s: self.refresh(src))))
+             if s.last_refresh_status == "failed":
+                 badges.append(chip("refresh failed", ft.Colors.RED_500))
+             if s.refresh_minutes:
+diff --git a/databridge/ui/views/studio.py b/databridge/ui/views/studio.py
+index c8c1487..c38c4eb 100644
+--- a/databridge/ui/views/studio.py
++++ b/databridge/ui/views/studio.py
+@@ -19,7 +19,7 @@ from databridge.engine.mapper import MappingSpec, MapResult, source_columns_afte
+ from databridge.services import mappings as svc
+ from databridge.services import sources as src_svc
+ from databridge.services import targets as tgt_svc
+-from databridge.ui.common import (mounted, STATUS_COLORS, card, chip, close_dialog, df_table, dialog, guarded, toast,
++from databridge.ui.common import (background, mounted, STATUS_COLORS, card, chip, close_dialog, df_table, dialog, guarded, toast,
+                                   type_badge)
+ from databridge.ui.components.mapping_canvas import ROW_H, Link, link_canvas
+ 
+@@ -115,7 +115,7 @@ class MappingStudio:
+             *([chip("read-only", ft.Colors.OUTLINE)] if self.readonly else [
+                 ft.OutlinedButton("Auto-map", icon=ft.Icons.AUTO_FIX_HIGH, on_click=guarded(self.page, self.auto_map)),
+                 *([ft.OutlinedButton("AI suggest", icon=ft.Icons.AUTO_AWESOME,
+-                                     on_click=guarded(self.page, self.ai_suggest))] if self.app.can("use_ai") else []),
++                                     on_click=background(self.page, self.ai_suggest))] if self.app.can("use_ai") else []),
+                 self.steps_btn,
+                 ft.OutlinedButton("Save draft", icon=ft.Icons.SAVE_OUTLINED, on_click=guarded(self.page, self.save)),
+                 ft.FilledButton("Publish", icon=ft.Icons.PUBLISH, on_click=guarded(self.page, self.publish)),
+@@ -543,7 +543,7 @@ class MappingStudio:
+ 
+         dialog(self.page, "AI suggest mappings", ft.Column([model, note, spinner], tight=True, spacing=10), [
+             ft.TextButton("Cancel", on_click=lambda _: close_dialog(self.page)),
+-            ft.FilledButton("Suggest", icon=ft.Icons.AUTO_AWESOME, on_click=guarded(self.page, go))], width=520)
++            ft.FilledButton("Suggest", icon=ft.Icons.AUTO_AWESOME, on_click=background(self.page, go))], width=520)
+ 
+     def accept(self, target: str) -> None:
+         self.app.require("design")
+diff --git a/databridge/ui/views/workflows.py b/databridge/ui/views/workflows.py
+index 5e23bc1..79c5c7b 100644
+--- a/databridge/ui/views/workflows.py
++++ b/databridge/ui/views/workflows.py
+@@ -14,7 +14,7 @@ import flet.canvas as cv
+ from databridge.ai import guardrails as gr
+ from databridge.services import llm, mappings as map_svc, prompts as prompt_svc, sources as src_svc
+ from databridge.services import workflows as wf_svc
+-from databridge.ui.common import (card, chip, close_dialog, confirm, df_table, dialog, empty_state, guarded,
++from databridge.ui.common import (background, card, chip, close_dialog, confirm, df_table, dialog, empty_state, guarded,
+                                   mounted, toast)
+ 
+ NODE_W, NODE_H = 170, 86
+@@ -171,8 +171,8 @@ class WorkflowEditor:
+             ft.OutlinedButton("Check & estimate", icon=ft.Icons.FACT_CHECK_OUTLINED,
+                               on_click=guarded(self.page, lambda _: self.check())),
+             ft.OutlinedButton("Test (3 rows)", icon=ft.Icons.SCIENCE_OUTLINED,
+-                              on_click=guarded(self.page, lambda _: self.run(test=True))),
+-            ft.FilledTonalButton("Run", icon=ft.Icons.PLAY_ARROW, on_click=guarded(self.page, lambda _: self.run())),
++                              on_click=background(self.page, lambda _: self.run(test=True))),
++            ft.FilledTonalButton("Run", icon=ft.Icons.PLAY_ARROW, on_click=background(self.page, lambda _: self.run())),
+             ft.FilledButton("Publish", icon=ft.Icons.PUBLISH, on_click=guarded(self.page, lambda _: self.publish())),
+         ], spacing=8)
+         palette = ft.Column([ft.Text("Add a node", size=13, weight=ft.FontWeight.W_600)], spacing=6, width=165)
+@@ -818,7 +818,7 @@ class WorkflowEditor:
+ 
+         dialog(self.page, "Run input", ft.Column(list(boxes.values()), spacing=10, tight=True),
+                [ft.TextButton("Cancel", on_click=lambda _: close_dialog(self.page)),
+-                ft.FilledButton("Run", on_click=guarded(self.page, go))], width=560)
++                ft.FilledButton("Run", on_click=background(self.page, go))], width=560)
+ 
+     def run(self, test: bool = False) -> None:
+         self.save(quiet=True)
+@@ -937,7 +937,7 @@ def estimate_dialog(page: ft.Page, est: dict, on_run=None) -> None:
+         def go(_):
+             close_dialog(page)
+             on_run()
+-        actions.append(ft.FilledButton(f"Run (~{est['tokens_expected']:,} tokens)", on_click=guarded(page, go)))
++        actions.append(ft.FilledButton(f"Run (~{est['tokens_expected']:,} tokens)", on_click=background(page, go)))
+     dialog(page, "Estimate" if not on_run else "Confirm run", content, actions, width=720)
+ 
+ 
+@@ -1025,7 +1025,7 @@ def classify_dialog(page: ft.Page, app, source_id: int, on_done=None) -> None:
+     dialog(page, f"Classify columns: {src.name}", ft.Column([
+         small("Used by AI guardrails. External models: PII is masked, confidential columns are blocked. Internal "
+               "models receive everything. Unclassified columns count as internal."),
+-        ft.OutlinedButton("Suggest from data", icon=ft.Icons.AUTO_FIX_HIGH, on_click=guarded(page, suggest)),
++        ft.OutlinedButton("Suggest from data", icon=ft.Icons.AUTO_FIX_HIGH, on_click=background(page, suggest)),
+         *rows], spacing=8, tight=True, scroll=ft.ScrollMode.AUTO),
+         [ft.TextButton("Cancel", on_click=lambda _: close_dialog(page)),
+          ft.FilledButton("Save", on_click=guarded(page, save))], width=560, height=min(560, 170 + 48 * len(rows)))
+diff --git a/tests/test_ui_dialogs.py b/tests/test_ui_dialogs.py
+index eb8b1a2..37d1b65 100644
+--- a/tests/test_ui_dialogs.py
++++ b/tests/test_ui_dialogs.py
+@@ -55,3 +55,35 @@ def test_errors_from_dialog_buttons_show_inside_the_dialog(monkeypatch):
+ def test_friendly_errors():
+     assert common.friendly_error(ValueError("Keep at least one column")) == "Keep at least one column"
+     assert "KeyError" in common.friendly_error(KeyError("x"))  # unexpected: type kept, pointer to the log
++
++
++def test_background_handlers_run_off_the_event_loop_and_ignore_repeat_clicks():
++    import asyncio
++    import threading
++
++    from databridge.ui.common import background
++
++    class Page:
++        updates = 0
++
++        def update(self):
++            Page.updates += 1
++
++    seen, gate = [], threading.Event()
++
++    def slow(_e):
++        seen.append(threading.current_thread() is threading.main_thread())
++        gate.wait(2)
++
++    handler = background(Page(), slow)
++    assert asyncio.iscoroutinefunction(handler)  # Flet awaits it instead of running it on the loop
++
++    async def clicks():
++        first = asyncio.create_task(handler(None))
++        await asyncio.sleep(0.05)
++        await handler(None)  # a second click while the first runs: ignored, returns at once
++        gate.set()
++        await first
++
++    asyncio.run(clicks())
++    assert seen == [False] and Page.updates == 1

@@ -1,0 +1,22 @@
+# Optional database and file-system drivers. Install only what you connect to.
+# The Connections screen shows which drivers are installed.
+
+# Databases
+oracledb              # Oracle (thin mode, no Instant Client needed)
+psycopg[binary]       # PostgreSQL
+pymysql               # MySQL / MariaDB
+pyodbc                # SQL Server and generic ODBC (also needs the MS ODBC 18 driver on the host)
+# ibm_db_sa           # DB2
+# snowflake-sqlalchemy
+# sqlalchemy-bigquery
+# sqlalchemy-redshift
+# sqlalchemy-hana
+# teradatasqlalchemy
+# duckdb-engine
+
+# File systems
+smbprotocol           # Windows / SMB shares
+sshfs                 # SFTP
+# s3fs                # Amazon S3
+# adlfs               # Azure Blob / ADLS
+# gcsfs               # Google Cloud Storage

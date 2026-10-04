@@ -1,0 +1,33 @@
+# systemd unit for DataBridge without Docker. install.sh fills in __USER__ and __BASE__.
+[Unit]
+Description=DataBridge (mapping studio + broker API)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__BASE__/current
+EnvironmentFile=__BASE__/shared/.env
+# Proxies allowed to set X-Forwarded-Proto/For: Nginx on this host, or Traefik on a Docker network.
+# The app only listens on 127.0.0.1 or the docker0 address, so nothing else can reach it. A value in
+# shared/.env overrides this (EnvironmentFile wins over Environment).
+Environment=DATABRIDGE_TRUSTED_PROXIES=127.0.0.1,::1,172.16.0.0/12
+# One worker (Flet keeps studio sessions in process memory); TLS, proxy trust and websocket limits come from
+# the DATABRIDGE_* settings (see databridge/serve.py).
+ExecStart=__BASE__/current/.venv/bin/python -m databridge.serve --host ${BIND_HOST} --port ${PORT}
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__BASE__/shared __BASE__/backups
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

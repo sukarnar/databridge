@@ -1,0 +1,89 @@
+# DataBridge on a Hostinger VPS, behind the Traefik instance you already run (same pattern as LinkVault).
+#
+#   Studio (/)          -> in-app sign-in (accounts created by admins; lockout after failed attempts)
+#   API (/api, /health) -> public over HTTPS, rate limited; every data route requires an X-API-Key
+#
+# First time on the VPS:  see README "Deploy to a Hostinger VPS".
+services:
+  app:
+    image: ghcr.io/${GHCR_USER:-sukarnar}/databridge:${IMAGE_TAG:-latest}
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABRIDGE_DATABASE_URL: postgresql+psycopg://databridge:${POSTGRES_PASSWORD}@postgres:5432/databridge
+      DATABRIDGE_DATA_DIR: /data
+      DATABRIDGE_PUBLIC_BASE_URL: https://${DATABRIDGE_HOST}
+    volumes:
+      - databridge-data:/data
+      # Optional: a folder on the VPS that file-system connections can read (protocol "file", root /inbox)
+      - ./inbox:/inbox:ro
+      # Optional: company CA for all AI calls -> set DATABRIDGE_AI_CA_BUNDLE=/certs/company-ca.pem in .env
+      # - ./certs:/certs:ro
+      # Optional: company LLM configuration -> set DATABRIDGE_AI_CONFIG_FILE=/config/llm.yaml in .env
+      # - ./config:/config:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets the app reach a local Ollama/vLLM on the VPS host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Flet keeps each studio session in process memory: run ONE app container with ONE uvicorn worker.
+    deploy:
+      resources:
+        limits:
+          memory: ${APP_MEMORY_LIMIT:-2g}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik}
+      - traefik.http.services.databridge.loadbalancer.server.port=8000
+      # API + health: API keys protect data; rate-limited per client IP
+      - traefik.http.routers.databridge-api.rule=Host(`${DATABRIDGE_HOST}`) && (PathPrefix(`/api`) || Path(`/health`))
+      - traefik.http.routers.databridge-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.databridge-api.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.databridge-api.priority=100
+      - traefik.http.routers.databridge-api.service=databridge
+      - traefik.http.routers.databridge-api.middlewares=databridge-ratelimit
+      - traefik.http.middlewares.databridge-ratelimit.ratelimit.average=20
+      - traefik.http.middlewares.databridge-ratelimit.ratelimit.burst=40
+      # Studio (everything else, including the Flet websocket /ws). Sign-in happens in the app.
+      # Optional extra layer, e.g. office IPs only:
+      #   - traefik.http.middlewares.databridge-ipallow.ipallowlist.sourcerange=203.0.113.0/24
+      #   and add databridge-ipallow to the studio router's middlewares.
+      - traefik.http.routers.databridge-studio.rule=Host(`${DATABRIDGE_HOST}`)
+      - traefik.http.routers.databridge-studio.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.databridge-studio.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.databridge-studio.priority=10
+      - traefik.http.routers.databridge-studio.service=databridge
+      # Secure websockets: Traefik upgrades /ws (studio) and /api/v1/stream (streaming API) on the websecure
+      # entrypoint, so browsers and clients use wss://. DataBridge refuses plain ws:// (DATABRIDGE_REQUIRE_HTTPS
+      # follows the https public address), checks the Origin and sets HSTS.
+      # TLS 1.2+ only: define the `databridge-tls` options from deploy/native/traefik-dynamic.yml in Traefik's
+      # file provider, then uncomment:
+      #   - traefik.http.routers.databridge-api.tls.options=databridge-tls@file
+      #   - traefik.http.routers.databridge-studio.tls.options=databridge-tls@file
+    networks: [web, internal]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: databridge
+      POSTGRES_USER: databridge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U databridge"]
+      interval: 10s
+      retries: 5
+    networks: [internal]   # never published to the internet
+
+volumes:
+  databridge-data:
+  postgres-data:
+
+networks:
+  web:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}   # the Docker network your Traefik container is on
+  internal:

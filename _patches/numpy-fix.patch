@@ -1,0 +1,162 @@
+diff --git a/databridge/services/scheduler.py b/databridge/services/scheduler.py
+index 813b8f5..3c45309 100644
+--- a/databridge/services/scheduler.py
++++ b/databridge/services/scheduler.py
+@@ -26,7 +26,9 @@ def run_due(now: datetime | None = None) -> list[tuple[str, str]]:
+         try:
+             out = src_svc.refresh(src.id)
+             outcome = "unchanged" if out.get("skipped") else f"{out['rows']:,} rows"
+-        except Exception as e:  # noqa: BLE001 - recorded on the source; keep going with the others
++        except (KeyboardInterrupt, SystemExit):
++            raise
++        except BaseException as e:  # noqa: BLE001 - recorded on the source (native panics too); keep going
+             outcome = f"failed: {e}"
+             log.warning("Scheduled refresh of %s failed: %s", src.name, e)
+         done.append((src.name, outcome))
+@@ -37,7 +39,9 @@ def _loop() -> None:
+     while not _stop.wait(TICK_SECONDS):
+         try:
+             run_due(datetime.now(timezone.utc))
+-        except Exception:  # noqa: BLE001 - never let the scheduler die
++        except (KeyboardInterrupt, SystemExit):
++            raise
++        except BaseException:  # noqa: BLE001 - never let the scheduler die, not even on a native panic
+             log.exception("scheduler tick failed")
+ 
+ 
+diff --git a/databridge/services/sources.py b/databridge/services/sources.py
+index 7ee8ec9..89c83fc 100644
+--- a/databridge/services/sources.py
++++ b/databridge/services/sources.py
+@@ -1,7 +1,9 @@
+ """Source objects and snapshots: uploads, files on shares, database tables, SQL queries and REST APIs."""
+ 
++import array
+ import hashlib
+ import shutil
++import sys
+ import threading
+ from datetime import datetime, timezone
+ from pathlib import Path
+@@ -202,7 +204,7 @@ def create_connector_source(name: str, connection_id: int, ref: dict[str, Any],
+         refresh(src.id, auto_publish=False, progress=progress)
+         if cancel is not None and cancel.is_set():  # cancelled after the last page: still add nothing
+             raise ValueError("Cancelled")
+-    except Exception:
++    except BaseException:  # also native-library panics (not Exceptions): never leave a half-made source
+         delete_source(src.id)  # nothing half-created: the user can fix the request and try again
+         raise
+     if minutes:
+@@ -246,8 +248,8 @@ def refresh(source_id: int, auto_publish: bool = True, progress=None) -> dict[st
+     started = datetime.now(timezone.utc)
+     try:
+         result = _refresh(source_id, auto_publish, progress)
+-    except Exception as e:
+-        _record_refresh(source_id, started, "failed", str(e)[:1000])
++    except BaseException as e:  # also native-library panics, so the Sources page shows the failure
++        _record_refresh(source_id, started, "failed", str(e)[:1000] or type(e).__name__)
+         raise
+     else:
+         status = "unchanged" if result.get("skipped") else "ok"
+@@ -269,11 +271,23 @@ def _record_refresh(source_id: int, started: datetime, status: str, message: str
+                 src.last_refresh_ok_at = started
+ 
+ 
++def _uint64_bytes(hashes: pl.Series) -> bytes | memoryview:
++    """The row hashes as raw 8-byte values (same bytes numpy's tobytes() gave, so old fingerprints still match),
++    without needing numpy: Arrow's buffer directly, or a plain array as a fallback."""
++    try:
++        arr = hashes.to_arrow()
++        if arr.null_count == 0 and sys.byteorder == "little":
++            return memoryview(arr.buffers()[1])[arr.offset * 8:(arr.offset + len(arr)) * 8]
++    except Exception:  # noqa: BLE001 - pyarrow missing or an unusual layout: use the portable way
++        pass
++    return array.array("Q", hashes.to_list()).tobytes()
++
++
+ def frame_hash(df: pl.DataFrame) -> str:
+     """Fingerprint of the rows and columns, to skip snapshots of unchanged data (scheduled polling)."""
+     h = hashlib.sha256(repr([(c, str(t)) for c, t in df.schema.items()]).encode())
+     if df.height:
+-        h.update(df.hash_rows(seed=0, seed_1=1, seed_2=2, seed_3=3).to_numpy().tobytes())
++        h.update(_uint64_bytes(df.hash_rows(seed=0, seed_1=1, seed_2=2, seed_3=3)))
+     return h.hexdigest()  # 64 characters: fits Snapshot.file_hash (PostgreSQL enforces the length)
+ 
+ 
+diff --git a/databridge/ui/common.py b/databridge/ui/common.py
+index c2a524e..722f02b 100644
+--- a/databridge/ui/common.py
++++ b/databridge/ui/common.py
+@@ -56,7 +56,9 @@ def guarded(page: ft.Page, fn: Callable[..., Any]) -> Callable[..., Any]:
+     def handler(*args, **kwargs):
+         try:
+             return fn(*args, **kwargs)
+-        except Exception as e:  # noqa: BLE001 - user-facing boundary
++        except (KeyboardInterrupt, SystemExit):
++            raise
++        except BaseException as e:  # noqa: BLE001 - user-facing boundary (native panics are BaseException)
+             if not is_user_error(e):
+                 traceback.print_exc()
+             show_error(page, friendly_error(e))
+@@ -128,7 +130,10 @@ async def run_in_dialog(status: DialogStatus, controls: list[ft.Control], busy_m
+     status.busy(busy_message)
+     try:
+         result = await asyncio.to_thread(work)
+-    except Exception as e:  # noqa: BLE001 - shown to the user in the dialog
++    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
++        raise
++    except BaseException as e:  # noqa: BLE001 - shown in the dialog; BaseException: a native library's panic
++        # (e.g. pyo3's PanicException) is not an Exception, and must not leave the dialog spinning forever
+         if cancel is not None and cancel.is_set():
+             return
+         if not is_user_error(e):
+diff --git a/tests/test_rest.py b/tests/test_rest.py
+index 00b4a02..815f185 100644
+--- a/tests/test_rest.py
++++ b/tests/test_rest.py
+@@ -806,3 +806,45 @@ def test_delete_source_removes_snapshots_and_refuses_while_mapped(base_url):
+     sources.delete_source(src.id)
+     assert src.id not in [s.id for s in sources.list_sources()]
+     assert not Path(folder).exists()
++
++
++class FakePanic(BaseException):
++    """Like pyo3's PanicException (e.g. Polars without numpy): a BaseException, not an Exception."""
++
++
++def test_fingerprint_needs_no_numpy_and_a_native_panic_never_hangs_the_dialog(base_url, monkeypatch):
++    import array
++    import asyncio
++    import hashlib
++
++    df = pl.DataFrame({"id": [1, 2, 3], "name": ["a", None, "c"]}).slice(1)  # a slice: non-zero Arrow offset
++    h = hashlib.sha256(repr([(c, str(t)) for c, t in df.schema.items()]).encode())
++    h.update(array.array("Q", df.hash_rows(seed=0, seed_1=1, seed_2=2, seed_3=3).to_list()).tobytes())
++    assert sources.frame_hash(df) == h.hexdigest()  # same bytes numpy gave: old fingerprints still match
++
++    # a panic during the first snapshot: no half-made source, and the dialog shows an error instead of spinning
++    def panic(*a, **k):
++        raise FakePanic("Failed to access NumPy array API capsule")
++
++    monkeypatch.setattr(sources, "frame_hash", panic)
++    connection = _connection(base_url, name="Panic API")
++    with pytest.raises(FakePanic):
++        sources.create_connector_source("Panicked", connection.id, {"path": "/test"})
++    assert not [s for s in sources.list_sources() if s.name == "Panicked"]
++
++    from databridge.ui import common
++
++    shown = {}
++
++    class Status:
++        def busy(self, text):
++            shown["busy"] = text
++
++        def error(self, text):
++            shown["error"] = text
++
++    asyncio.run(common.run_in_dialog(Status(), [], "Working...",
++                                     lambda: sources.create_connector_source("Panicked", connection.id,
++                                                                             {"path": "/test"}),
++                                     lambda result: shown.setdefault("success", result)))
++    assert "FakePanic" in shown["error"] and "success" not in shown
