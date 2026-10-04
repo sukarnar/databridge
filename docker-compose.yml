@@ -34,7 +34,7 @@ services:
           memory: ${APP_MEMORY_LIMIT:-2g}
     labels:
       - traefik.enable=true
-      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik}
+      - traefik.docker.network=${TRAEFIK_NETWORK}
       - traefik.http.services.databridge.loadbalancer.server.port=8000
       # API + health: API keys protect data; rate-limited per client IP
       - traefik.http.routers.databridge-api.rule=Host(`${DATABRIDGE_HOST}`) && (PathPrefix(`/api`) || Path(`/health`))
@@ -85,5 +85,5 @@ volumes:
 networks:
   web:
     external: true
-    name: ${TRAEFIK_NETWORK:-traefik}   # the Docker network your Traefik container is on
+    name: ${TRAEFIK_NETWORK}   # the Docker network your Traefik container is on
   internal:
