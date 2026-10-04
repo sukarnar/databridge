@@ -274,7 +274,7 @@ The studio runs over a websocket (`/ws`), and the streaming API over another (`/
 
 Upgrading a native install: the new systemd unit starts `python -m databridge.serve` (re-run `deploy/native/install.sh`, or edit `ExecStart` as in `deploy/native/databridge.service`). The old unit keeps working.
 
-## REST API sources
+## REST API source
 
 Any HTTP API returning **JSON, CSV or XML** can be a source (connection type **REST API**):
 
