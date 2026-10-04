@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 #     curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/ms.gpg && \
 #     echo "deb [signed-by=/usr/share/keyrings/ms.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql.list && \
 #     apt-get update && ACCEPT_EULA=Y apt-get install -y msodbcsql18 && rm -rf /var/lib/apt/lists/*
-
+LABEL org.opencontainers.image.source=https://github.com/sukarnar/databridge
 WORKDIR /app
 COPY requirements.txt requirements-drivers.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r requirements-drivers.txt
