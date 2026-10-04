@@ -508,7 +508,7 @@ def test_guide_example_1_triage(designer, internal_ref):
     _, nodes = wf_svc.get_run(r.id)
     sent = " ".join(s["user"] for nr in nodes for s in (nr.samples or []))
 
-    # PII columns must never be sent to the model
+    # PII columns must never be sent to the models
     assert "ann@acme.com" not in sent
     assert "Ann Lee" not in sent
     assert "email:" not in sent and "customer:" not in sent
