@@ -429,7 +429,7 @@ def test_builtin_tls_serves_wss(run_server, published, pki):
     old.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
     old.maximum_version = ssl.TLSVersion.TLSv1_1
     with pytest.raises((ssl.SSLError, OSError)):
-        connect(f"wss://localhost:{port}/api/v1/stream", ssl=old, open_timeout=5)
+        connect(f"wss://localhost:{port}/api/v1/stream", ssl=old, open_timeout=20)
 
 
 def test_tls_13_only(run_server, published, pki):
@@ -437,7 +437,7 @@ def test_tls_13_only(run_server, published, pki):
                       tls_min_version="1.3")
     with pytest.raises((ssl.SSLError, OSError)):
         connect(f"wss://localhost:{port}/api/v1/stream", ssl=_client_ctx(pki, max_version=ssl.TLSVersion.TLSv1_2),
-                open_timeout=5)
+                open_timeout=20)
     with connect(f"wss://localhost:{port}/api/v1/stream", ssl=_client_ctx(pki),
                  additional_headers={"X-API-Key": published["admin"]}) as ws:
         assert _recv(ws)["type"] == "welcome"
@@ -449,7 +449,7 @@ def test_mutual_tls_required(run_server, published, pki):
     url = f"wss://localhost:{port}/api/v1/stream"
     with pytest.raises((ssl.SSLError, OSError, WebSocketException)):
         with connect(url, ssl=_client_ctx(pki), additional_headers={"X-API-Key": published["admin"]},
-                     open_timeout=5) as ws:
+                     open_timeout=20) as ws:
             ws.recv(timeout=5)  # TLS 1.3 reports a missing client certificate after the handshake
     with connect(url, ssl=_client_ctx(pki, cert=True), additional_headers={"X-API-Key": published["admin"]}) as ws:
         assert _recv(ws)["type"] == "welcome"
