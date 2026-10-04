@@ -507,7 +507,14 @@ def test_guide_example_1_triage(designer, internal_ref):
     assert set(urgent["ticket_id"]) == {"T-1001", "T-1005"}  # "ASAP" / "urgent" -> 5
     _, nodes = wf_svc.get_run(r.id)
     sent = " ".join(s["user"] for nr in nodes for s in (nr.samples or []))
-    assert "ann@acme.com" not in sent and "Ann Lee" not in sent and "short_note: Charged twice" in sent
+
+    # PII columns must never be sent to the model
+    assert "ann@acme.com" not in sent
+    assert "Ann Lee" not in sent
+    assert "email:" not in sent and "customer:" not in sent
+    # the derived column was sent instead of the raw note
+    assert "short_note: " in sent
+    assert "\nnote: " not in sent
 
 
 def test_guide_example_2_sales_summary(designer, external_ref):
