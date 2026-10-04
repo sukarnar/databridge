@@ -343,7 +343,7 @@ Pushing to `main` runs `.github/workflows/deploy.yml`: **tests, then build the i
    - If the GHCR package is private, run once: `echo <token with read:packages> | docker login ghcr.io -u <you> --password-stdin`.
 4. **GitHub secrets** (Settings, then Secrets and variables, then Actions): `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY` (a private key whose public key is in the VPS user's `~/.ssh/authorized_keys`), and optionally `VPS_PORT`.
 5. Re-run the workflow (Actions, then build-and-deploy, then Run workflow) or push again. Open `https://<your domain>` and sign in as `admin` with the printed password.
-
+ 
 ### Day to day
 
 - **Deploy**: push to `main`, or use Run workflow.
