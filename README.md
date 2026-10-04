@@ -286,7 +286,7 @@ Any HTTP API returning **JSON, CSV or XML** can be a source (connection type **R
 - **Refresh:** the button, a built-in schedule per source (`DATABRIDGE_SOURCE_SCHEDULER=true`), or `POST /api/v1/sources/{id}/refresh`. A new snapshot is stored only when the data changed, and published mappings then republish automatically.
 - **Safety:** requests only go to the connection's server (next links and redirects elsewhere are refused). Requests can't override the auth headers. POST is off unless an admin allows it. 429/5xx answers are retried, honouring `Retry-After`. XML with a DOCTYPE is refused. Errors never include secrets.
 
-## Broker API
+## Broker APIs
 
 | Method | Route | Purpose |
 | --- | --- | --- |
