@@ -1,15 +1,8 @@
-# DataBridge on a Hostinger VPS, behind the Traefik instance you already run (same pattern as LinkVault).
-#
-#   Studio (/)          -> in-app sign-in (accounts created by admins; lockout after failed attempts)
-#   API (/api, /health) -> public over HTTPS, rate limited; every data route requires an X-API-Key
-#
-# First time on the VPS:  see README "Deploy to a Hostinger VPS".
 services:
   app:
     image: ghcr.io/${GHCR_USER:-sukarnar}/databridge:${IMAGE_TAG:-latest}
     build: .
     restart: unless-stopped
-    env_file: .env
     environment:
       DATABRIDGE_DATABASE_URL: postgresql+psycopg://databridge:${POSTGRES_PASSWORD}@postgres:5432/databridge
       DATABRIDGE_DATA_DIR: /data
